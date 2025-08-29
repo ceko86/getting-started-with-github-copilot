@@ -5,11 +5,13 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
+from pymongo import MongoClient
+from typing import Dict, List, Any
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -19,63 +21,27 @@ current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
 
-# In-memory activity database
-activities = {
-    "Chess Club": {
-        "description": "Learn strategies and compete in chess tournaments",
-        "schedule": "Fridays, 3:30 PM - 5:00 PM",
-        "max_participants": 12,
-        "participants": ["michael@mergington.edu", "daniel@mergington.edu"]
-    },
-    "Programming Class": {
-        "description": "Learn programming fundamentals and build software projects",
-        "schedule": "Tuesdays and Thursdays, 3:30 PM - 4:30 PM",
-        "max_participants": 20,
-        "participants": ["emma@mergington.edu", "sophia@mergington.edu"]
-    },
-    "Gym Class": {
-        "description": "Physical education and sports activities",
-        "schedule": "Mondays, Wednesdays, Fridays, 2:00 PM - 3:00 PM",
-        "max_participants": 30,
-        "participants": ["john@mergington.edu", "olivia@mergington.edu"]
-    },
-    "Basketball Team": {
-        "description": "Join the school basketball team and compete in local tournaments",
-        "schedule": "Wednesdays, 4:00 PM - 6:00 PM",
-        "max_participants": 15,
-        "participants": []
-    },
-    "Soccer Club": {
-        "description": "Practice soccer skills and play friendly matches",
-        "schedule": "Saturdays, 10:00 AM - 12:00 PM",
-        "max_participants": 20,
-        "participants": []
-    },
-    "Drama Club": {
-        "description": "Act, direct, and produce school plays and performances",
-        "schedule": "Thursdays, 3:30 PM - 5:30 PM",
-        "max_participants": 18,
-        "participants": []
-    },
-    "Art Workshop": {
-        "description": "Explore painting, drawing, and sculpture techniques",
-        "schedule": "Mondays, 4:00 PM - 5:30 PM",
-        "max_participants": 16,
-        "participants": []
-    },
-    "Debate Team": {
-        "description": "Develop public speaking and argumentation skills",
-        "schedule": "Tuesdays, 4:00 PM - 5:30 PM",
-        "max_participants": 10,
-        "participants": []
-    },
-    "Math Club": {
-        "description": "Solve challenging math problems and prepare for competitions",
-        "schedule": "Fridays, 3:30 PM - 4:30 PM",
-        "max_participants": 12,
-        "participants": []
-    }
-}
+# MongoDB connection
+def get_db():
+    client = MongoClient('mongodb://localhost:27017/')
+    db = client['school_activities_db']
+    try:
+        yield db
+    finally:
+        client.close()
+
+# Helper function to convert MongoDB document to dictionary format
+def format_activities_for_frontend(activities_from_db: List[Dict[str, Any]]) -> Dict[str, Any]:
+    activities_dict = {}
+    for activity in activities_from_db:
+        activity_name = activity['name']
+        activities_dict[activity_name] = {
+            "description": activity['description'],
+            "schedule": activity['schedule'],
+            "max_participants": activity['max_participants'],
+            "participants": activity['participants']
+        }
+    return activities_dict
 
 
 @app.get("/")
@@ -84,24 +50,56 @@ def root():
 
 
 @app.get("/activities")
-def get_activities():
-    return activities
+async def get_activities(db=Depends(get_db)):
+    """Get all activities"""
+    activities_cursor = db.activities.find()
+    activities_list = list(activities_cursor)
+    return format_activities_for_frontend(activities_list)
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+async def signup_for_activity(activity_name: str, email: str, db=Depends(get_db)):
     """Sign up a student for an activity"""
     # Validate activity exists
-    if activity_name not in activities:
+    activity = db.activities.find_one({"name": activity_name})
+    if activity is None:
         raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Get the specific activity
-    activity = activities[activity_name]
-
-    # Add student
     # Validate student is not already signed up
     if email in activity["participants"]:
         raise HTTPException(status_code=400, detail="Student already signed up")
-
-    activity["participants"].append(email)
+    
+    # Add student to the activity
+    result = db.activities.update_one(
+        {"name": activity_name},
+        {"$push": {"participants": email}}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=500, detail="Failed to sign up student")
+        
     return {"message": f"Signed up {email} for {activity_name}"}
+
+
+@app.delete("/activities/{activity_name}/unregister")
+async def unregister_from_activity(activity_name: str, email: str, db=Depends(get_db)):
+    """Unregister a student from an activity"""
+    # Validate activity exists
+    activity = db.activities.find_one({"name": activity_name})
+    if activity is None:
+        raise HTTPException(status_code=404, detail="Activity not found")
+
+    # Validate student is signed up
+    if email not in activity["participants"]:
+        raise HTTPException(status_code=400, detail="Student is not signed up for this activity")
+    
+    # Remove student from the activity
+    result = db.activities.update_one(
+        {"name": activity_name},
+        {"$pull": {"participants": email}}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=500, detail="Failed to unregister student")
+        
+    return {"message": f"Unregistered {email} from {activity_name}"}
